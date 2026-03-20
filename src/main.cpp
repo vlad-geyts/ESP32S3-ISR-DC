@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Preferences.h> // Include the NVS wrapper
 
+Preferences prefs;
+
 // Handle for the Binary Semaphore
 SemaphoreHandle_t panicSemaphore;
 
