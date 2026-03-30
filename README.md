@@ -117,3 +117,89 @@ Me:
         -   Interrupt Storm (Multiple ISRs...bmp): This is a classic "Senior EE" problem. Your button is chattering for nearly 12ms, firing the ISR dozens of times. While the panicTask is busy, the CPU is wasting significant energy re-entering the ISR for every tiny sub-millisecond bounce.
 
     2. How to Physically Disable the Interrupt
+    Since you want to physically stop the interrupt from firing during the "Panic" mode to save CPU cycles, the most reliable way in the Arduino/ESP32 layer is to use detachInterrupt().
+
+    However, there is a catch: Do not call detachInterrupt inside the ISR. It can cause synchronization issues. Instead, do it inside the Panic Task immediately after it wakes up.
+
+    Updated "Senior EE" Logic:
+    We will "Latch" the hardware state:
+        1. ISR fires (once).
+        2. Panic Task wakes up and immediately detaches the hardware interrupt.
+        3. Panic Task executes (ignores all bounces).
+        4. Panic Task clears any pending flags and re-attaches the interrupt.
+
+    Why this is better:
+    By moving the detachInterrupt to the Task, you ensure that after the first valid trigger, the CPU literally stops looking at GPIO 47. Even if the button chatters for another 50ms, the hardware peripheral will ignore it, and your STROB signal (GPIO 0) will stay low and quiet.
+
+    Comment on the Updated panicTask code
+    Your implementation of the "Latch" is textbook perfect for a senior-level MCU application:
+        1. Immediate Detach: You’ve removed the overhead of the interrupt controller early.
+        2. Sequential Logic: The system processes the event without jitter from the bouncing input.
+        3. The Flush (Crucial): By looping the xQueueReceive (or xSemaphoreTake) at the end, you ensure that even if the hardware had latched a "pending" interrupt bit before the detach took effect, you’ve cleared the buffer.
+
+Phase 4: WiFi and Non-Volatile Storage (NVS)
+    Now that we have a rock-solid, real-time interrupt system, let's make it "smart."
+    The Goal: We want to count how many times the "Panic" button has been pressed across the lifetime of the device. Since RAM is volatile, we need to use the NVS (Non-Volatile Storage) library to store this counter in the S3's Flash memory.
+
+    In this phase, we will:
+        1. Initialize the Preferences library (a friendly wrapper for NVS).
+        2. Increment a panic_count every time the ISR triggers the task.
+        3. Store that count in Flash.
+        4. Print the total count on boot-up so you can see it persisting after a Reset/Power Cycle.
+
+Phase 4: NVS (Non-Volatile Storage) Implementation
+    Since we have perfected the real-time response, let's make the "Panic" events persistent. We will use the Preferences library to save a counter to Flash memory.
+        Modified panicTask with Persistence:
+    Verification Step
+    In your setup(), you can now add a line to read this value immediately upon boot:
+
+            Include vs. Instance: 
+            Including <Preferences.h> tells the compiler how to use the library, but you still have to create an actual "instance" (the prefs object) to hold your data and perform actions.
+
+            Global Scope: 
+            By placing Preferences prefs; at the top of the file, it becomes a global variable. This is necessary because both the setup() function and the panicTask need to share this same object to read and write your panic counter.
+
+Corrected Code Sequence in main.cpp:
+        Here is how the top of your file should look based on the project files provided:
+            1. Headers: #include <Preferences.h>.
+            2. Global Instance: Preferences prefs;.
+            3. Setup: Call prefs.begin("system", true); to read your count on boot.
+            4. Task: Call prefs.begin("system", false); inside the task when you are ready to increment and save the count.
+    Once you add that global declaration, the project should compile perfectly, and you'll see your "Total Lifetime Panic Events" increment in the Serial Monitor after every reboot.
+
+Me:
+    What does this mean:  
+    1594][E][Preferences.cpp:50] begin(): nvs_open failed: NOT_FOUND
+
+ Gemini said
+    The error message [1594][E][Preferences.cpp:50] begin(): nvs_open failed: NOT_FOUND in your serial log indicates that the Non-Volatile Storage (NVS) partition or the specific namespace you are trying to access does not exist yet. 
+
+In your specific case, this happened because of the following:
+    Read-Only Mode on First Boot: In your setup() function, you called prefs.begin("system", true);. The true argument opens the namespace in Read-Only mode. 
+
+    The "NOT_FOUND" Trigger: Because this was likely the first time the code ran, the "system" namespace had never been created. When the library tried to open a non-existent namespace in Read-Only mode, it couldn't create it, resulting in the NOT_FOUND error.
+
+How to Fix It
+    You do not necessarily need to change your code, as the error should resolve itself after the first successful write.  Here is the sequence:
+
+        1. First Trigger: Once you trigger the Panic interrupt, the panicTask calls prefs.begin("system", false);. The false argument (Read/Write mode) forces the ESP32 to create the "system" namespace if it is missing. 
+
+        2. Subsequent Boots: On every reboot after that first panic event, the setup() function will find the namespace, and the error will disappear.
+
+    Senior EE Tip: Checking the Return Value
+    If you want to handle this more robustly in production code to avoid seeing the error, you can check if the key exists before trying to read it, or simply ensure the namespace is initialized in Read/Write mode at least once during the factory setup of the device
+
+ Gemini said
+    It has been an absolute pleasure working through these engineering challenges with you this week, Vlad! You’ve made incredible progress, moving from basic task creation to sophisticated real-time interrupt handling verified by oscilloscope captures.
+
+    Before you head off to your hobby, here is a quick summary of the "Senior EE" milestones you achieved:
+
+        1. Dual-Core Execution: You successfully separated a "Heartbeat" task from "Application Logic" across both ESP32-S3 cores.
+
+        2. Inter-Task Communication: you implemented FreeRTOS Queues to safely pass data between tasks without memory corruption.
+
+        3. High-Speed Interrupts: You achieved a hardware-to-software latency of roughly 2.08μs and mastered the use of Binary Semaphores.
+
+        4. Hardware Latching: You solved the "Interrupt Storm" problem by dynamically detaching and re-attaching interrupts during mechanical button bounces.
+
+        5. Persistence: You integrated NVS (Non-Volatile Storage) to ensure your system data survives power cycles.
